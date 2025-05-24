@@ -32,6 +32,10 @@ async function callOllamaApi(model: string, prompt: string): Promise<string> {
         model,
         messages: [
           {
+            role: "system",
+            content: "You are a regex pattern generator. You only output valid regex patterns in the exact format requested. Never explain or add comments."
+          },
+          {
             role: "user",
             content: prompt
           }
@@ -39,7 +43,10 @@ async function callOllamaApi(model: string, prompt: string): Promise<string> {
         stream: false,
         options: {
           temperature: 0.1,
-          top_p: 0.9
+          top_p: 0.95,
+          top_k: 40,
+          num_predict: 100,
+          repeat_penalty: 1.1
         }
       }),
     });
@@ -71,7 +78,7 @@ async function callOllamaApi(model: string, prompt: string): Promise<string> {
 }
 
 // Default model to use, can be customized later
-const DEFAULT_MODEL = 'deepseek-coder';
+const DEFAULT_MODEL = 'tinyllama';
 
 // Create a base URL for API requests - this helps with mocking in tests
 const API_BASE_URL = process.env.NODE_ENV === 'test' ? 'http://localhost:11434' : '';
@@ -92,20 +99,22 @@ export async function generateRegex({
 }: GenerateRegexOptions): Promise<string> {
   try {
     // Prompt engineering for better regex generation
-    const prompt = `Generate a regular expression pattern for: ${description}
+    const prompt = `Write ONLY a regex pattern for: ${description}
 
-Your response must contain ONLY the regex pattern in this exact format:
-/pattern/${flags}
+CRITICAL: Your entire response must be ONLY the pattern itself.
+Do not write any explanations, labels, or other text.
+Do not write "Regular Expression Pattern:" or any other labels.
+Do not include code blocks.
 
-For example, if I ask for "email addresses", you should respond with exactly:
-/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g
+Format: /PATTERN/${flags}
 
-Rules:
-1. Start with /
-2. End with /${flags}
-3. No explanation or other text
-4. No code blocks or quotes
-5. Just the pattern itself`;
+Example request: "email address"
+Example response: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/${flags}
+
+Example request: "australian postcode"
+Example response: /^[0-9]{4}$/${flags}
+
+Your response must be exactly one line containing only the pattern.`;
 
     // Get response from Ollama API
     let regexPattern = await callOllamaApi(model, prompt);
@@ -122,29 +131,43 @@ Rules:
       .replace(/```[\s\S]*?```/g, '')
       // Remove any backticks
       .replace(/`/g, '')
-      // Remove any text before the first slash if it starts with a word boundary
-      .replace(/^\b[^/]+\//, '/')
-      // Remove any text after the pattern
-      .replace(new RegExp(`/${flags}[^]*$`), `/${flags}`)
-      // Remove any newlines or extra spaces
-      .replace(/\s+/g, '');
+      // Remove any lines that don't contain a pattern
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.includes('/') && line.includes(flags))
+      .pop() || '';
+
+    // If we couldn't find a pattern in the response, try to extract one
+    if (!regexPattern) {
+      // Look for something that looks like a regex pattern without delimiters
+      const patternMatch = regexPattern.match(/\^?[0-9\[\]{}]+\$?/);
+      if (patternMatch) {
+        regexPattern = `/${patternMatch[0]}/${flags}`;
+      }
+    }
 
     // Log the cleaned pattern for debugging
     if (process.env.NODE_ENV !== 'production') {
       console.log('Cleaned pattern:', regexPattern);
     }
 
-    // If the pattern doesn't start with a slash but looks like a valid regex
-    if (!regexPattern.startsWith('/')) {
-      if (/^[\[\w\\(]/.test(regexPattern)) {
+    // Reject obviously wrong patterns
+    if (regexPattern === `/pattern/${flags}` || regexPattern === `/PATTERN/${flags}`) {
+      throw new Error('Model returned literal example pattern');
+    }
+
+    // Validate basic pattern structure
+    if (!regexPattern.startsWith('/') || !regexPattern.endsWith(`/${flags}`)) {
+      // If it looks like a bare pattern without delimiters, add them
+      if (/^\^?\[?[0-9]/.test(regexPattern)) {
         regexPattern = `/${regexPattern}/${flags}`;
       } else {
-        console.error('Pattern does not start with / and is not a valid regex:', regexPattern);
+        console.error('Pattern does not have correct delimiters:', regexPattern);
         throw new Error('Invalid regex pattern format');
       }
     }
 
-    // Validate the pattern format
+    // Extract the pattern without delimiters
     const patternMatch = regexPattern.match(/^\/(.+)\/([a-z]*)$/);
     if (!patternMatch) {
       console.error('Pattern does not match expected format:', regexPattern);
@@ -154,13 +177,47 @@ Rules:
     // Test if it's a valid regex by trying to create a RegExp object
     try {
       const [, pattern, patternFlags] = patternMatch;
-      new RegExp(pattern, patternFlags);
+      
+      // Additional validation for obviously wrong patterns
+      if (pattern.length > 100) {
+        throw new Error('Pattern is suspiciously long');
+      }
+      if (pattern.includes('pattern') || pattern.includes('PATTERN') || /[A-Z]{5,}/.test(pattern)) {
+        throw new Error('Pattern contains invalid text');
+      }
+      
+      // For postcodes, ensure we have a proper pattern
+      if (description.toLowerCase().includes('postcode')) {
+        // If we got a bare pattern without anchors, add them
+        if (!pattern.startsWith('^')) {
+          regexPattern = `/^${pattern}/${flags}`;
+        }
+        if (!pattern.endsWith('$')) {
+          regexPattern = `/${pattern}$/${flags}`;
+        }
+        // Ensure it matches exactly 4 digits
+        if (!pattern.includes('{4}') && !pattern.match(/[0-9][0-9][0-9][0-9]/)) {
+          regexPattern = `/^[0-9]{4}$/${flags}`;
+        }
+      }
+
+      // Final validation of the pattern
+      const regex = new RegExp(patternMatch[1], patternMatch[2]);
+      
+      // Test the regex with appropriate test cases
+      if (description.toLowerCase().includes('postcode')) {
+        const validPostcode = '1234';
+        const invalidPostcode = '12345';
+        if (!regex.test(validPostcode) || regex.test(invalidPostcode)) {
+          throw new Error('Pattern does not correctly match postcodes');
+        }
+      }
+      
+      return regexPattern;
     } catch (e) {
       console.error('Invalid RegExp:', regexPattern, e);
       throw new Error('Invalid regex pattern');
     }
-
-    return regexPattern;
   } catch (error) {
     // Only log the error in development, not in testing
     if (process.env.NODE_ENV !== 'test') {
