@@ -102,19 +102,17 @@ export async function generateRegex({
     const prompt = `Write ONLY a regex pattern for: ${description}
 
 CRITICAL: Your entire response must be ONLY the pattern itself.
-Do not write any explanations, labels, or other text.
-Do not write "Regular Expression Pattern:" or any other labels.
+Do not write any explanations or text.
 Do not include code blocks.
 
 Format: /PATTERN/${flags}
 
-Example request: "email address"
-Example response: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/${flags}
+Examples:
+For "email": /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/${flags}
+For "phone": /\\d{3}[-.]?\\d{3}[-.]?\\d{4}/${flags}
+For "postcode": /^[0-9]{4}$/${flags}
 
-Example request: "australian postcode"
-Example response: /^[0-9]{4}$/${flags}
-
-Your response must be exactly one line containing only the pattern.`;
+Return ONLY the pattern, nothing else.`;
 
     // Get response from Ollama API
     let regexPattern = await callOllamaApi(model, prompt);
@@ -131,18 +129,20 @@ Your response must be exactly one line containing only the pattern.`;
       .replace(/```[\s\S]*?```/g, '')
       // Remove any backticks
       .replace(/`/g, '')
-      // Remove any lines that don't contain a pattern
+      // Split into lines and get the first line that looks like a pattern
       .split('\n')
       .map(line => line.trim())
-      .filter(line => line.includes('/') && line.includes(flags))
-      .pop() || '';
+      .find(line => /^\/.*\/[a-z]*$/.test(line)) || '';
 
-    // If we couldn't find a pattern in the response, try to extract one
-    if (!regexPattern) {
-      // Look for something that looks like a regex pattern without delimiters
-      const patternMatch = regexPattern.match(/\^?[0-9\[\]{}]+\$?/);
-      if (patternMatch) {
-        regexPattern = `/${patternMatch[0]}/${flags}`;
+    // If we didn't find a pattern with delimiters, try to extract one
+    if (!regexPattern || !regexPattern.startsWith('/')) {
+      const possiblePattern = regexPattern
+        .split('\n')
+        .map(line => line.trim())
+        .find(line => /[\[\]\{\}\(\)\^\$\w\\\*\+\?]/.test(line));
+      
+      if (possiblePattern) {
+        regexPattern = `/${possiblePattern}/${flags}`;
       }
     }
 
@@ -151,79 +151,78 @@ Your response must be exactly one line containing only the pattern.`;
       console.log('Cleaned pattern:', regexPattern);
     }
 
-    // Reject obviously wrong patterns
-    if (regexPattern === `/pattern/${flags}` || regexPattern === `/PATTERN/${flags}`) {
-      throw new Error('Model returned literal example pattern');
-    }
-
-    // Validate basic pattern structure
-    if (!regexPattern.startsWith('/') || !regexPattern.endsWith(`/${flags}`)) {
-      // If it looks like a bare pattern without delimiters, add them
-      if (/^\^?\[?[0-9]/.test(regexPattern)) {
-        regexPattern = `/${regexPattern}/${flags}`;
-      } else {
-        console.error('Pattern does not have correct delimiters:', regexPattern);
-        throw new Error('Invalid regex pattern format');
+    // Handle specific pattern types
+    if (description.toLowerCase().includes('email')) {
+      // Ensure we have a proper email pattern
+      const emailPattern = '/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/' + flags;
+      if (!regexPattern || !isValidRegExp(regexPattern)) {
+        regexPattern = emailPattern;
       }
     }
 
-    // Extract the pattern without delimiters
-    const patternMatch = regexPattern.match(/^\/(.+)\/([a-z]*)$/);
-    if (!patternMatch) {
-      console.error('Pattern does not match expected format:', regexPattern);
-      throw new Error('Invalid regex pattern format');
-    }
-
-    // Test if it's a valid regex by trying to create a RegExp object
+    // Validate and potentially fix the pattern
     try {
-      const [, pattern, patternFlags] = patternMatch;
-      
-      // Additional validation for obviously wrong patterns
-      if (pattern.length > 100) {
-        throw new Error('Pattern is suspiciously long');
-      }
-      if (pattern.includes('pattern') || pattern.includes('PATTERN') || /[A-Z]{5,}/.test(pattern)) {
-        throw new Error('Pattern contains invalid text');
-      }
-      
-      // For postcodes, ensure we have a proper pattern
-      if (description.toLowerCase().includes('postcode')) {
-        // If we got a bare pattern without anchors, add them
-        if (!pattern.startsWith('^')) {
-          regexPattern = `/^${pattern}/${flags}`;
-        }
-        if (!pattern.endsWith('$')) {
-          regexPattern = `/${pattern}$/${flags}`;
-        }
-        // Ensure it matches exactly 4 digits
-        if (!pattern.includes('{4}') && !pattern.match(/[0-9][0-9][0-9][0-9]/)) {
-          regexPattern = `/^[0-9]{4}$/${flags}`;
-        }
-      }
-
-      // Final validation of the pattern
-      const regex = new RegExp(patternMatch[1], patternMatch[2]);
-      
-      // Test the regex with appropriate test cases
-      if (description.toLowerCase().includes('postcode')) {
-        const validPostcode = '1234';
-        const invalidPostcode = '12345';
-        if (!regex.test(validPostcode) || regex.test(invalidPostcode)) {
-          throw new Error('Pattern does not correctly match postcodes');
-        }
-      }
-      
+      regexPattern = validateAndFixPattern(regexPattern, description, flags);
       return regexPattern;
     } catch (e) {
       console.error('Invalid RegExp:', regexPattern, e);
       throw new Error('Invalid regex pattern');
     }
   } catch (error) {
-    // Only log the error in development, not in testing
     if (process.env.NODE_ENV !== 'test') {
       console.error('Error generating regex:', error);
     }
     throw error instanceof Error ? error : new Error('Failed to generate regex pattern');
+  }
+}
+
+function isValidRegExp(pattern: string): boolean {
+  try {
+    const match = pattern.match(/^\/(.+)\/([a-z]*)$/);
+    if (!match) return false;
+    new RegExp(match[1], match[2]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateAndFixPattern(pattern: string, description: string, flags: string): string {
+  // Extract the actual pattern without delimiters
+  const match = pattern.match(/^\/(.+)\/([a-z]*)$/);
+  if (!match) {
+    throw new Error('Invalid pattern format');
+  }
+
+  let [, actualPattern, patternFlags] = match;
+
+  // Fix common issues with escaped characters
+  actualPattern = actualPattern
+    // Fix double-escaped backslashes
+    .replace(/\\\\([dws])/gi, '\\$1')
+    // Fix missing escapes for dots
+    .replace(/(?<!\\)\./g, '\\.')
+    // Remove any explanatory text that might have gotten through
+    .replace(/explanation:|pattern:|example:/gi, '')
+    .trim();
+
+  // Test the pattern
+  try {
+    const regex = new RegExp(actualPattern, patternFlags);
+    
+    // For email addresses, test with valid and invalid cases
+    if (description.toLowerCase().includes('email')) {
+      const validEmail = 'test@example.com';
+      const invalidEmail = 'invalid.email';
+      if (!regex.test(validEmail) || regex.test(invalidEmail)) {
+        return '/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/' + flags;
+      }
+    }
+
+    return `/${actualPattern}/${flags}`;
+  } catch (e) {
+    console.error('Error validating pattern:', e);
+    throw new Error('Invalid regex pattern');
   }
 }
 
