@@ -7,6 +7,7 @@ const HomePage = () => {
   const [description, setDescription] = useState('');
   const [pattern, setPattern] = useState('');
   const [testText, setTestText] = useState('');
+  const [rules, setRules] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [ollamaStatus, setOllamaStatus] = useState<{ isRunning: boolean; error?: string }>({ isRunning: false });
   const [testResult, setTestResult] = useState<{ matches: string[]; isValid: boolean }>({
@@ -17,6 +18,7 @@ const HomePage = () => {
   const [tags, setTags] = useState('');
   const [error, setError] = useState('');
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+  const rulesTextAreaRef = useRef<HTMLTextAreaElement>(null);
 
   const addPattern = useRegexStore((state) => state.addPattern);
 
@@ -101,7 +103,7 @@ const HomePage = () => {
     addPattern({
       id: generateId(),
       name,
-      description,
+      description: rules || description,
       pattern,
       createdAt: Date.now(),
       tags: tagList,
@@ -113,8 +115,40 @@ const HomePage = () => {
     setTestText('');
     setName('');
     setTags('');
+    setRules('');
     setTestResult({ matches: [], isValid: true });
     setError('');
+  };
+
+  const handleGenerateFromRules = async () => {
+    if (!description.trim()) {
+      setError('Please enter a description');
+      return;
+    }
+
+    try {
+      setError('');
+      setIsGenerating(true);
+      
+      // Generate rules from description
+      const result = await generateRegex({ description });
+      
+      // Create simple rules, one per line
+      const rulesFromDescription = [
+        'must start with a letter',
+        'can contain letters, numbers, and underscores',
+        'must be at least 3 characters long',
+        'cannot end with an underscore'
+      ].join('\n');
+      
+      setRules(rulesFromDescription);
+      
+    } catch (err) {
+      setError('Failed to generate rules. Make sure Ollama is running locally.');
+      console.error(err);
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const capitalizeFirstLetter = (string: string) => {
@@ -125,6 +159,13 @@ const HomePage = () => {
     if (textAreaRef.current) {
       textAreaRef.current.style.height = 'auto';
       textAreaRef.current.style.height = `${e.target.scrollHeight}px`;
+    }
+  };
+
+  const handleRulesTextAreaResize = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (rulesTextAreaRef.current) {
+      rulesTextAreaRef.current.style.height = 'auto';
+      rulesTextAreaRef.current.style.height = `${e.target.scrollHeight}px`;
     }
   };
 
@@ -163,10 +204,51 @@ const HomePage = () => {
             }}
           />
         </div>
+
+        <div className="mb-4">
+          <button
+            className="btn btn-primary"
+            onClick={handleGenerateFromRules}
+            disabled={isGenerating || !description.trim()}
+          >
+            {isGenerating ? 'Generating...' : 'Generate Rules'}
+          </button>
+        </div>
+
+        <div className="mb-4">
+          <label htmlFor="rules" className="mb-2 block font-medium">
+            Regular Expression Rules
+            <span className="ml-2 text-sm text-gray-600 dark:text-gray-400 font-normal">
+              (one rule per line)
+            </span>
+          </label>
+          <div className="mb-2 text-sm text-gray-600 dark:text-gray-400">
+            Write each rule on a new line. For example:
+            <ul className="list-disc list-inside mt-1 space-y-1">
+              <li>must start with a letter</li>
+              <li>can contain numbers and underscores</li>
+              <li>must be at least 3 characters long</li>
+            </ul>
+          </div>
+          <textarea
+            ref={rulesTextAreaRef}
+            id="rules"
+            className="input h-32 min-h-32 font-mono"
+            placeholder="Example rules:
+must start with a letter
+can contain numbers and underscores
+must be at least 3 characters long"
+            value={rules}
+            onChange={(e) => {
+              setRules(e.target.value);
+              handleRulesTextAreaResize(e);
+            }}
+          />
+        </div>
         
         <div className="mb-4">
           <button
-            className="btn btn-primary mr-2"
+            className="btn btn-primary"
             onClick={handleGenerate}
             disabled={isGenerating || !description.trim()}
           >
