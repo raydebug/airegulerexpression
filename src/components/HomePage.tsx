@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { generateRegex, testRegex } from '@/utils/ollamaClient';
+import { useState, useRef, useEffect } from 'react';
+import { generateRegex, testRegex, checkOllamaStatus } from '@/utils/ollamaClient';
 import { generateId } from '@/utils/helpers';
 import { useRegexStore } from '@/stores/regexStore';
 
@@ -8,6 +8,7 @@ const HomePage = () => {
   const [pattern, setPattern] = useState('');
   const [testText, setTestText] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<{ isRunning: boolean; error?: string }>({ isRunning: false });
   const [testResult, setTestResult] = useState<{ matches: string[]; isValid: boolean }>({
     matches: [],
     isValid: true,
@@ -18,6 +19,21 @@ const HomePage = () => {
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
 
   const addPattern = useRegexStore((state) => state.addPattern);
+
+  useEffect(() => {
+    const checkStatus = async () => {
+      const status = await checkOllamaStatus();
+      setOllamaStatus(status);
+    };
+    
+    // Check status immediately
+    checkStatus();
+    
+    // Set up periodic status checks every 30 seconds
+    const interval = setInterval(checkStatus, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
 
   const handleGenerate = async () => {
     if (!description.trim()) {
@@ -115,7 +131,21 @@ const HomePage = () => {
   return (
     <div className="max-w-3xl mx-auto">
       <div className="card">
-        <h1 className="mb-6 text-2xl font-bold">AI RegEx Generator</h1>
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-2xl font-bold">AI RegEx Generator</h1>
+          <div className="flex items-center gap-2">
+            <span className="text-sm">Ollama Status:</span>
+            {ollamaStatus.isRunning ? (
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
+                Running
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400" title={ollamaStatus.error}>
+                Not Running
+              </span>
+            )}
+          </div>
+        </div>
         
         <div className="mb-4">
           <label htmlFor="description" className="mb-2 block font-medium">
